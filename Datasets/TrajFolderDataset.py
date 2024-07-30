@@ -142,14 +142,14 @@ class EuRoCTrajFolderLoader:
 
         ############################## load images ######################################################################
         df = pandas.read_csv(datadir + '/cam0/data.csv')
-        timestamps_left = df.values[:, 0].astype(int) // int(1e6)
+        timestamps_left = df.values[:, 0].astype(np.int64) // int(1e6)
         all_timestamps.append(timestamps_left)
         self.rgbfiles = datadir + '/cam0/data/' + df.values[:, 1]
 
         ############################## load stereo right images ######################################################################
         if isfile(datadir + '/cam1/data.csv'):
             df = pandas.read_csv(datadir + '/cam1/data.csv')
-            timestamps_right = df.values[:, 0].astype(int) // int(1e6)
+            timestamps_right = df.values[:, 0].astype(np.int64) // int(1e6)
             all_timestamps.append(timestamps_right)
             self.rgbfiles_right = datadir + '/cam1/data/' + df.values[:, 1]
         else:
@@ -183,7 +183,7 @@ class EuRoCTrajFolderLoader:
 
         ############################## load gt poses ######################################################################
         df = pandas.read_csv(datadir + '/state_groundtruth_estimate0/data.csv')
-        timestamps_pose = df.values[:, 0].astype(int) // int(1e6)
+        timestamps_pose = df.values[:, 0].astype(np.int64) // int(1e6)
         all_timestamps.append(timestamps_pose)
         self.poses = df.values[:, (1,2,3, 5,6,7,4)].astype(np.float32)
         self.vels = df.values[:, 8:11].astype(np.float32)
@@ -207,7 +207,7 @@ class EuRoCTrajFolderLoader:
         ############################## load imu data ######################################################################
         if isfile(datadir + '/imu0/data.csv'):
             df = pandas.read_csv(datadir + '/imu0/data.csv')
-            timestamps_imu = df.values[:, 0].astype(int) // int(1e6)
+            timestamps_imu = df.values[:, 0].astype(np.int64) // int(1e6)
             accels = df.values[:, 4:7].astype(np.float32)
             gyros = df.values[:, 1:4].astype(np.float32)
 

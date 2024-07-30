@@ -1,6 +1,6 @@
 # export CUDA_VISIBLE_DEVICES=1
 
-data_dir=/data/euroc/MH_01_easy/mav0
+data_dir=../euroc/MH_01_easy/mav0
 
 loss_weight='(4,0.1,2,0.1)'
 rot_w=1

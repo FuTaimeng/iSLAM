@@ -142,6 +142,9 @@ if __name__ == '__main__':
         imu_optimizer = optim.Adam(imu_module.denoiser.parameters(), lr=3e-5)
 
     ############################## logs before running ######################################################################
+    os.makedirs(args.result_dir, exist_ok=True)
+    os.makedirs(args.save_model_dir, exist_ok=True)
+    
     with open(trainroot+'/args.txt', 'w') as f:
         f.write(str(args))
     np.savetxt(trainroot+'/gt_pose.txt', dataset.poses)

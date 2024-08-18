@@ -217,6 +217,14 @@ if __name__ == '__main__':
             T_IL = dataset.rgb2imu_pose.to(motions.device)
             motions = T_IL @ motions @ T_IL.Inv()
 
+            os.makedirs(f'{args.result_dir}/flow', exist_ok=True)
+            os.makedirs(f'{args.result_dir}/disp', exist_ok=True)
+            os.makedirs(f'{args.result_dir}/rgb', exist_ok=True)
+            for i in range(args.batch_size):
+                np.save(f'{args.result_dir}/flow/{current_idx+i}.npy', vo_result['flow'][i].detach().cpu().numpy())
+                np.save(f'{args.result_dir}/disp/{current_idx+i}.npy', vo_result['disp'][i].detach().cpu().numpy())
+                np.save(f'{args.result_dir}/rgb/{current_idx+i}.npy', sample['img0'][i].cpu().numpy())
+
         timer.toc('vo')
  
         T0 = pgo_poses_list[-1]

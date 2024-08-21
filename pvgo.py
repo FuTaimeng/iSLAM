@@ -13,17 +13,15 @@ from pypose.optim.scheduler import StopOnPlateau
 
  
 class PoseVelGraph(nn.Module):
-    def __init__(self, nodes, vels, reproj=None):
+    def __init__(self, nodes, vels):
         super().__init__()
 
         assert nodes.size(0) == vels.size(0)
         self.nodes = pp.Parameter(nodes.clone())
         self.vels = torch.nn.Parameter(vels.clone())
 
-        self.reproj = reproj
 
-
-    def forward(self, edges, poses, imu_drots, imu_dtrans, imu_dvels, dts):
+    def forward(self, edges, poses, imu_drots, imu_dtrans, imu_dvels, dts, loop_edges=None, loop_poses=None):
         nodes = self.nodes
         vels = self.vels
         
@@ -50,18 +48,16 @@ class PoseVelGraph(nn.Module):
         # translation-velocity cross constraint
         transvelerr = torch.diff(nodes.translation(), dim=0) - (vels[:-1] * dts + imu_dtrans)
 
-        if self.reproj is not None:
-            node1 = nodes[ :-1]
-            node2 = nodes[1:  ]
-            motion = node1.Inv() @ node2
-            motion[0] = 0.1
-            reprojerr = self.reproj(motion)
-            if len(reprojerr.shape) == 3:
-                reprojerr = reprojerr.view(-1, self.reproj.N*2)
-            return pgerr, adjvelerr, imuroterr, transvelerr, reprojerr
-        
-        else:
-            return pgerr, adjvelerr, imuroterr, transvelerr
+        errs = (pgerr, adjvelerr, imuroterr, transvelerr)
+
+        if loop_edges is not None:
+            node1 = nodes[loop_edges[:, 0]]
+            node2 = nodes[loop_edges[:, 1]]
+            error = loop_poses.Inv() @ node1.Inv() @ node2
+            looperr = error.Log().tensor()
+            errs = errs + (looperr,)
+                    
+        return errs
 
 
     def vo_loss(self, edges, poses):
@@ -119,16 +115,17 @@ class PoseVelGraph(nn.Module):
         return nodes, vels
 
 
-def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtrans, imu_dvels, 
-                device='cuda:0', radius=1e4, loss_weight=(1,1,1,1), reproj=None, target='vo'):
+def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtrans, imu_dvels, loop_links=None, loop_motions=None,
+                device='cuda:0', radius=1e4, loss_weight=(1,1,1,1), target='vo'):
     
     vo_rot_infos = np.ones(len(links)) * loss_weight[0]**2
     vo_trans_infos = np.ones(len(links)) * loss_weight[0]**2
     imu_rot_infos = np.ones(len(init_nodes)-1) * loss_weight[2]**2
     imu_vel_infos = np.ones(len(init_nodes)-1) * loss_weight[1]**2
     transvel_infos = np.ones(len(init_nodes)-1) * loss_weight[3]**2
-    if reproj is not None:
-        reproj_infos = np.ones(len(init_nodes)-1) * (loss_weight[4]/reproj.N)**2
+    if loop_links is not None:
+        loop_rot_infos = np.ones(len(loop_links)) * loss_weight[4]**2
+        loop_trans_infos = np.ones(len(loop_links)) * loss_weight[4]**2
 
     vo_info_mats       = [torch.diag(torch.tensor([vo_trans_infos[i]]*3 + [vo_rot_infos[i]]*3))
                           for i in range(len(vo_trans_infos))]
@@ -138,13 +135,19 @@ def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtran
                           for i in range(len(imu_vel_infos))]
     transvel_info_mats = [torch.diag(torch.tensor([transvel_infos[i]]*3))
                           for i in range(len(transvel_infos))]
-    if reproj is not None:
-        reproj_info_mats = [torch.diag(torch.tensor([reproj_infos[i]]*(reproj.N*2)))
-                          for i in range(len(reproj_infos))]
+    if loop_links is not None:
+        loop_info_mats     = [torch.diag(torch.tensor([loop_trans_infos[i]]*3 + [loop_rot_infos[i]]*3))
+                            for i in range(len(loop_trans_infos))]
     
     # init inputs
     edges = links.to(device)
     poses = vo_motions.detach().to(device)
+
+    if loop_links is not None:
+        loop_edges = loop_links.to(device)
+        loop_poses = loop_motions.detach().to(device)
+    else:
+        loop_edges = loop_poses = None
 
     imu_drots_grad = imu_drots.to(device)
     imu_dvels_grad = imu_dvels.to(device)
@@ -158,14 +161,15 @@ def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtran
     imu_rot_info_mats = torch.stack(imu_rot_info_mats).to(torch.float32).to(device)
     imu_vel_info_mats = torch.stack(imu_vel_info_mats).to(torch.float32).to(device)
     transvel_info_mats = torch.stack(transvel_info_mats).to(torch.float32).to(device)
+    if loop_links is not None:
+        loop_info_mats = torch.stack(loop_info_mats).to(torch.float32).to(device)
 
     weights = [vo_info_mats, imu_vel_info_mats, imu_rot_info_mats, transvel_info_mats]
-    if reproj is not None:
-        reproj_info_mats = torch.stack(reproj_info_mats).to(torch.float32).to(device)
-        weights.append(reproj_info_mats)
+    if loop_links is not None:
+        weights.append(loop_info_mats)
 
     # build graph and optimizer
-    graph = PoseVelGraph(init_nodes.detach(), init_vels.detach(), reproj).to(device)
+    graph = PoseVelGraph(init_nodes.detach(), init_vels.detach()).to(device)
     solver = ppos.Cholesky()
     strategy = ppost.TrustRegion(radius=radius)
     optimizer = pp.optim.LM(graph, solver=solver, strategy=strategy, min=1e-4, vectorize=True)
@@ -175,8 +179,7 @@ def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtran
 
     # optimization loop
     while scheduler.continual():
-        loss = optimizer.step(input=(edges, poses, imu_drots, imu_dtrans, imu_dvels, dts), weight=weights)
-        # loss = optimizer.step(input=(edges, poses, imu_drots, imu_dtrans, imu_dvels, dts))
+        loss = optimizer.step(input=(edges, poses, imu_drots, imu_dtrans, imu_dvels, dts, loop_edges, loop_poses), weight=weights)
         scheduler.step(loss)
 
     # end_time = time.time()
@@ -187,6 +190,8 @@ def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtran
         trans_loss, rot_loss = graph.vo_loss(edges, vo_motions)
     elif target == 'imu':
         trans_loss, rot_loss = graph.imu_loss(imu_drots_grad, imu_dvels_grad)
+    else:
+        trans_loss = rot_loss = None, None
 
     # for test
     # trans_loss, rot_loss = graph.vo_loss_unroll(edges, data.poses_withgrad)
@@ -199,7 +204,8 @@ def run_pvgo(init_nodes, init_vels, vo_motions, links, dts, imu_drots, imu_dtran
     covs = {'vo_rot':vo_rot_infos, 'imu_rot':imu_rot_infos,
             'vo_trans':vo_trans_infos, 'imu_vel':imu_vel_infos,
             'transvel':transvel_infos}
-    if reproj is not None:
-        covs['reproj'] = reproj_infos
+    if loop_links is not None:
+        covs['loop_rot'] = loop_rot_infos
+        covs['loop_trans'] = loop_trans_infos
 
     return trans_loss, rot_loss, nodes, vels, covs

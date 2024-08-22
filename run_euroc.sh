@@ -1,6 +1,6 @@
 # export CUDA_VISIBLE_DEVICES=1
 
-data_dir=../euroc/MH_01_easy/mav0
+data_dir=/data/euroc/MH_01_easy/mav0
 
 loss_weight='(4,0.1,2,0.1)'
 rot_w=1
@@ -17,7 +17,7 @@ mkdir -p train_results/${project_name}/${train_name}
 mkdir -p train_results_models/${project_name}/${train_name}
 
 
-python train.py \
+python test.py \
     --result-dir train_results/${project_name}/${train_name} \
     --save-model-dir train_results_models/${project_name}/${train_name} \
     --project-name ${project_name} \

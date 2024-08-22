@@ -1,0 +1,3 @@
+[submodule "superglue"]
+	path = superglue
+	url = git@github.com:FuTaimeng/SuperGluePretrainedNetwork.git

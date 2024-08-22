@@ -122,3 +122,18 @@ def pose2motion_pypose(pose):
 
     motion = pp.SE3(torch.stack(motion))
     return motion
+
+def aggregate_keyframe_motion_pypose(motion, keyframes):
+    motion = cvtSE3_pypose(motion)
+
+    motion_list = []
+    for i in range(len(keyframes)-1):
+        st = keyframes[i]
+        end = keyframes[i+1]
+        m = motion[st]
+        for j in range(st+1, end):
+            m = motion[j] @ m
+        motion_list.append(m)
+
+    motion = pp.SE3(torch.stack(motion_list))
+    return motion

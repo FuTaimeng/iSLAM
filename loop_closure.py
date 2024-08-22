@@ -1,8 +1,12 @@
+import time
 import bisect
 
 import torch
 import numpy as np
 import pypose as pp
+
+from Datasets.transformation import aggregate_keyframe_motion_pypose
+from pvgo import run_pvgo
 
 
 class LoopClosure:
@@ -54,6 +58,62 @@ class LoopClosure:
         
     def get_keyframes(self):
         return torch.tensor(self.keyframes)
+    
+    def run_loop_closure(self, init_poses, init_vels, motions, dts, loss_weight, imu_module):
+        print('Running loop closure ...')
+        t0 = time.time()
+
+        if not isinstance(dts, torch.Tensor):
+            dts = torch.tensor(dts)
+
+        keyframes = self.get_keyframes()
+        print('\tNum keyframes:', len(keyframes))
+
+        t1 = time.time()
+
+        imu_dtrans_list, imu_drots_list, imu_dvels_list = [], [], []
+        for i in range(len(keyframes)-1):
+            st = keyframes[i]
+            end = keyframes[i+1]
+            init_state = {'rot':init_poses[st].rotation().numpy(), 'pos':init_poses[st].translation().numpy(), 'vel':init_vels[st].numpy()}
+            imu_dtrans, imu_drots, imu_dcovs, imu_dvels = imu_module.integrate(
+                st, end, init_state, motion_mode=True, batch_mode=True
+            )
+            imu_dtrans_list.extend(imu_dtrans.detach())
+            imu_drots_list.extend(imu_drots.detach())
+            imu_dvels_list.extend(imu_dvels.detach())
+            
+        imu_drots = pp.SO3(np.stack(imu_drots_list))
+        imu_dtrans = torch.tensor(np.stack(imu_dtrans_list), dtype=torch.float32)
+        imu_dvels = torch.tensor(np.stack(imu_dvels_list), dtype=torch.float32)
+
+        t2 = time.time()
+        print('\tIMU integration done in', t2-t1)
+
+        init_poses = init_poses[keyframes]
+        init_vels = init_vels[keyframes]
+        motions = aggregate_keyframe_motion_pypose(motions, keyframes)
+        links = torch.tensor([[i, i+1] for i in range(len(keyframes)-1)])
+        dts = torch.tensor([torch.sum(dts[keyframes[i]:keyframes[i+1]]) for i in range(len(keyframes)-1)])
+
+        loop_links, loop_motions = self.get_loopedges()
+        loop_links = torch.tensor([torch.where(keyframes==i)[0].item() for i in loop_links.view(-1)]).view(-1, 2)
+
+        _, _, loop_poses, loop_vels, covs = run_pvgo(
+            init_poses, init_vels,
+            motions, links, dts,
+            imu_drots, imu_dtrans, imu_dvels,
+            loop_links, loop_motions,
+            device='cuda', radius=1e4,
+            loss_weight=loss_weight,
+            target=''
+        )
+
+        t3 = time.time()
+        print('\tGlobal PVGO done in', t3-t2)
+        print('Total loop closure time:', t3-t0)
+
+        return loop_poses, loop_vels, keyframes
 
     # for testing
     def read_from_file(self, data_dir):
@@ -85,7 +145,6 @@ if __name__ == '__main__':
     from Datasets.TrajFolderDataset import TrajFolderDataset
     from imu_integrator import IMUModule
     from loop_closure import LoopClosure
-    from pvgo import run_pvgo
 
     dataroot = '/data/euroc/MH_01_easy/mav0'
     datatype = 'euroc'
@@ -94,7 +153,7 @@ if __name__ == '__main__':
     iteration = '1'
     loss_weight = (4,0.1,2,0.1, 4)
 
-    print('load dataset')
+    print('Loading dataset ...')
     dataset = TrajFolderDataset(
         datadir=dataroot, datatype=datatype, transform=None,
         start_frame=0, end_frame=-1
@@ -109,84 +168,24 @@ if __name__ == '__main__':
     )
 
     loop_closure = LoopClosure()
-    loop_closure.read_from_file(dataroot)
 
     vo_motions = np.loadtxt(f'{resultdir}/{iteration}/vo_motion.txt')
     pgo_poses = np.loadtxt(f'{resultdir}/{iteration}/pgo_pose.txt')
     pgo_vels = np.loadtxt(f'{resultdir}/{iteration}/pgo_vel.txt')
-    # imu_drots = np.loadtxt(f'{resultdir}/{iteration}/imu_drot.txt')
-    # imu_dtrans = np.loadtxt(f'{resultdir}/{iteration}/imu_dtrans.txt')
-    # imu_dvels = np.loadtxt(f'{resultdir}/{iteration}/imu_dvel.txt')
-
+    vo_motions = pp.SE3(vo_motions).to(torch.float32)
     pgo_poses = pp.SE3(pgo_poses).to(torch.float32)
     pgo_vels = torch.tensor(pgo_vels, dtype=torch.float32)
-    motions = pp.SE3(vo_motions).to(torch.float32)
-
+    
     # print(motions.rotation().Log().norm(dim=-1).mean() * 180/3.14)
     # print(motions.translation().norm(dim=-1).mean())
 
     loop_closure.add_frames(pgo_poses)
-    keyframes = loop_closure.get_keyframes()
-    print('keyframes', len(keyframes))
+    loop_closure.read_from_file(dataroot)
 
-    print('imu integration')
-    imu_dtrans_list = []
-    imu_drots_list = []
-    imu_dvels_list = []
-    for i in range(len(keyframes)-1):
-        st = keyframes[i]
-        end = keyframes[i+1]
-        init_state = {'rot':pgo_poses[st].rotation().numpy(), 'pos':pgo_poses[st].translation().numpy(), 'vel':pgo_vels[st].numpy()}
-        imu_dtrans, imu_drots, imu_dcovs, imu_dvels = imu_module.integrate(
-            st, end, init_state, motion_mode=True, batch_mode=True
-        )
-        imu_dtrans_list.extend(imu_dtrans.detach().cpu().numpy())
-        imu_drots_list.extend(imu_drots.detach().cpu().numpy())
-        imu_dvels_list.extend(imu_dvels.detach().cpu().numpy())
-
-    dts = torch.tensor(dataset.rgb_dts, dtype=torch.float32)
-    # imu_drots = pp.SO3(imu_drots).to(torch.float32)
-    # imu_dtrans = torch.tensor(imu_dtrans, dtype=torch.float32)
-    # imu_dvels = torch.tensor(imu_dvels, dtype=torch.float32)
-    imu_drots = pp.SO3(np.stack(imu_drots_list))
-    imu_dtrans = torch.tensor(np.stack(imu_dtrans_list), dtype=torch.float32)
-    imu_dvels = torch.tensor(np.stack(imu_dvels_list), dtype=torch.float32)
-    loop_links, loop_motions = loop_closure.get_loopedges()
-
-    pgo_poses = pgo_poses[keyframes]
-    pgo_vels = pgo_vels[keyframes]
-    motions_list = []
-    for i in range(len(keyframes)-1):
-        st = keyframes[i]
-        end = keyframes[i+1]
-        m = motions[st]
-        for j in range(st+1, end):
-            m = motions[j] @ m
-        motions_list.append(m)
-    motions = pp.SE3(torch.stack(motions_list))
-    links = torch.tensor([[i, i+1] for i in range(len(keyframes)-1)])
-    dts_list = []
-    for i in range(len(keyframes)-1):
-        st = keyframes[i]
-        end = keyframes[i+1]
-        dts_list.append(torch.sum(dts[st:end]))
-    dts = torch.stack(dts_list)
-    loop_links = [[torch.where(keyframes==l[0])[0].item(), torch.where(keyframes==l[1])[0].item()] for l in loop_links]
-    loop_links = torch.tensor(loop_links)
-
-    print('run pvgo')
-    _, _, loop_poses, loop_vels, covs = run_pvgo(
-        pgo_poses, pgo_vels,
-        motions, links, dts,
-        imu_drots, imu_dtrans, imu_dvels,
-        loop_links, loop_motions,
-        device='cuda', radius=1e4,
-        loss_weight=loss_weight,
-        target=''
-    )
+    loop_poses, loop_vels, keyframes = loop_closure.run_loop_closure(
+        pgo_poses, pgo_vels, vo_motions, dataset.rgb_dts, loss_weight, imu_module)
 
     loop_poses = loop_poses.detach().cpu().numpy()
     loop_vels = loop_vels.detach().cpu().numpy()
-
     np.savetxt(f'{resultdir}/{iteration}/loop_pose_{loss_weight[4]}.txt', loop_poses)
     np.savetxt(f'{resultdir}/{iteration}/loop_vel_{loss_weight[4]}.txt', loop_vels)
